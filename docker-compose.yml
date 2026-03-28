@@ -1,0 +1,9 @@
+services:
+  irc:
+    image: ghcr.io/ngircd/ngircd:latest
+    container_name: agentirc
+    ports:
+      - "127.0.0.1:6667:6667"
+    volumes:
+      - ./ngircd.conf:/opt/ngircd/etc/ngircd.conf:ro
+    restart: unless-stopped
