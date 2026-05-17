@@ -40,11 +40,37 @@ Environment variables:
 | `IRC_PORT` | `6667` | IRC server port |
 | `IRC_NICK` | `agentbot` | Bot's IRC nickname |
 | `IRC_CHANNEL` | `#agents` | Channel to join |
+| `OPENAI_API_KEY` | *(required)* | API key sent with every request |
+| `OPENAI_BASE_URL` | *(OpenAI default)* | Base URL for an OpenAI-compatible API |
 | `OPENAI_MODEL` | `gpt-4.1` | Model to use |
 | `MCP_CONFIG` | `mcp.json` | Path to MCP server config |
 | `TOOL_TIMEOUT` | `30` | Seconds before a single tool call is cancelled |
 | `MCP_INIT_TIMEOUT` | `30` | Seconds allowed for tool discovery at startup |
 | `MAX_TOOL_ITERS` | `10` | Maximum tool-call iterations per message |
+
+## Using local or alternative LLM servers
+
+Any OpenAI-compatible server works — set `OPENAI_BASE_URL` to point the bot at it and `OPENAI_MODEL` to a model the server exposes.
+
+**Ollama** (default port 11434):
+
+```bash
+OPENAI_BASE_URL=http://localhost:11434/v1 \
+OPENAI_API_KEY=ollama \
+OPENAI_MODEL=llama3.2 \
+uv run agentirc.py
+```
+
+**LM Studio** (default port 1234):
+
+```bash
+OPENAI_BASE_URL=http://localhost:1234/v1 \
+OPENAI_API_KEY=lmstudio \
+OPENAI_MODEL=local-model \
+uv run agentirc.py
+```
+
+`OPENAI_API_KEY` must be set to a non-empty string even when the server does not enforce authentication; most local servers accept any value.
 
 ## MCP tool configuration
 
