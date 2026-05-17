@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """AgentIRC - An OpenAI-powered IRC bot for agent communication."""
 
+import argparse
+import asyncio
+import json
 import os
 import socket
 import textwrap
@@ -9,11 +12,17 @@ import time
 
 from openai import OpenAI
 
+from mcptoolhandler import MCPToolExecutor
+
 IRC_HOST = os.getenv("IRC_HOST", "127.0.0.1")
 IRC_PORT = int(os.getenv("IRC_PORT", "6667"))
 IRC_NICK = os.getenv("IRC_NICK", "agentbot")
 IRC_CHANNEL = os.getenv("IRC_CHANNEL", "#agents")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+MCP_CONFIG = os.getenv("MCP_CONFIG", "mcp.json")
+TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "30"))
+INIT_TIMEOUT = int(os.getenv("MCP_INIT_TIMEOUT", "30"))
+MAX_TOOL_ITERS = int(os.getenv("MAX_TOOL_ITERS", "10"))
 MAX_LINE = 400  # safe IRC message content length
 
 
@@ -31,11 +40,34 @@ def split_irc(text: str, max_len: int = MAX_LINE) -> list[str]:
 
 
 class AgentIRC:
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.client = OpenAI()
         self.sock: socket.socket | None = None
         self.history: list[dict] = []
         self.history_lock = threading.Lock()
+        self.mcp: MCPToolExecutor | None = None
+        self.tools: list[dict] = []
+        self.debug = debug
+        self._init_mcp()
+
+    # ------------------------------------------------------------------
+    # MCP setup
+    # ------------------------------------------------------------------
+
+    def _init_mcp(self) -> None:
+        if not os.path.exists(MCP_CONFIG):
+            print(f"No MCP config found at {MCP_CONFIG}, running without tools.", flush=True)
+            return
+        try:
+            self.mcp = MCPToolExecutor(MCP_CONFIG)
+            self.tools = asyncio.run(
+                asyncio.wait_for(self.mcp.initialize_tools(), timeout=INIT_TIMEOUT)
+            )
+            print(f"Loaded {len(self.tools)} MCP tool(s): {[t['function']['name'] for t in self.tools]}", flush=True)
+        except asyncio.TimeoutError:
+            print(f"MCP init timed out after {INIT_TIMEOUT}s, running without tools.", flush=True)
+        except Exception as exc:
+            print(f"MCP init error: {exc}", flush=True)
 
     # ------------------------------------------------------------------
     # IRC plumbing
@@ -129,11 +161,7 @@ class AgentIRC:
             ]
 
         try:
-            response = self.client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-            )
-            reply = response.choices[0].message.content.strip()
+            reply = self._run_with_tools(messages)
         except Exception as exc:
             reply = f"Error from OpenAI: {exc}"
 
@@ -141,6 +169,57 @@ class AgentIRC:
             self.history.append({"role": "assistant", "content": reply})
 
         self.send_message(channel, reply)
+
+    def _run_with_tools(self, messages: list[dict]) -> str:
+        kwargs: dict = {"model": MODEL, "messages": messages}
+        if self.tools:
+            kwargs["tools"] = self.tools
+            kwargs["tool_choice"] = "auto"
+
+        for iteration in range(MAX_TOOL_ITERS + 1):
+            if iteration == MAX_TOOL_ITERS:
+                return "(max tool iterations reached)"
+
+            response = self.client.chat.completions.create(**kwargs)
+            msg = response.choices[0].message
+
+            if not msg.tool_calls:
+                return (msg.content or "").strip()
+
+            kwargs["messages"] = list(kwargs["messages"]) + [msg]
+
+            tool_results = []
+            for tc in msg.tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+
+                if self.debug:
+                    print(f"[tool] {name} args={json.dumps(args, indent=2)}", flush=True)
+
+                t0 = time.monotonic()
+                try:
+                    result = asyncio.run(
+                        asyncio.wait_for(self.mcp.execute_tool(name, args), timeout=TOOL_TIMEOUT)
+                    )
+                except asyncio.TimeoutError:
+                    result = json.dumps({"error": f"tool {name!r} timed out after {TOOL_TIMEOUT}s"})
+                elapsed = time.monotonic() - t0
+
+                if self.debug:
+                    print(f"[tool] {name} result ({elapsed:.2f}s): {result}", flush=True)
+                else:
+                    print(f"[tool] {name} ({elapsed:.2f}s)", flush=True)
+
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+
+            kwargs["messages"] = list(kwargs["messages"]) + tool_results
 
     # ------------------------------------------------------------------
     # Main loop
@@ -170,7 +249,11 @@ class AgentIRC:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AgentIRC bot")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose tool-execution logging")
+    args = parser.parse_args()
+
     if not os.getenv("OPENAI_API_KEY"):
         print("Error: OPENAI_API_KEY environment variable not set.")
         raise SystemExit(1)
-    AgentIRC().run()
+    AgentIRC(debug=args.debug).run()

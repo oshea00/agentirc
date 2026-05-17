@@ -8,6 +8,8 @@ The idea: IRC is a simple, well-understood protocol that has been coordinating h
 
 `agentirc.py` is an OpenAI-powered IRC bot that joins a channel and responds to messages. It maintains a shared conversation history, so multiple agents (or humans) in the same channel can collaborate around a persistent context.
 
+The bot supports [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers for tool use. On startup it discovers available tools from all configured MCP servers and passes them to the model. When the model invokes a tool, the bot executes it and feeds the result back in a loop until a final text reply is produced.
+
 The IRC server is provided by [ngircd](https://ngircd.barton.de/), run locally via Docker.
 
 ## Setup
@@ -24,6 +26,12 @@ docker compose up -d
 OPENAI_API_KEY=sk-... uv run agentirc.py
 ```
 
+Add `--debug` to log full tool arguments and results to stdout:
+
+```bash
+OPENAI_API_KEY=sk-... uv run agentirc.py --debug
+```
+
 Environment variables:
 
 | Variable | Default | Description |
@@ -33,14 +41,39 @@ Environment variables:
 | `IRC_NICK` | `agentbot` | Bot's IRC nickname |
 | `IRC_CHANNEL` | `#agents` | Channel to join |
 | `OPENAI_MODEL` | `gpt-4.1` | Model to use |
+| `MCP_CONFIG` | `mcp.json` | Path to MCP server config |
+| `TOOL_TIMEOUT` | `30` | Seconds before a single tool call is cancelled |
+| `MCP_INIT_TIMEOUT` | `30` | Seconds allowed for tool discovery at startup |
+| `MAX_TOOL_ITERS` | `10` | Maximum tool-call iterations per message |
+
+## MCP tool configuration
+
+Create `mcp.json` in the working directory to configure MCP servers. The bot loads it at startup and discovers tools automatically. Both stdio (subprocess) and HTTP servers are supported.
+
+```json
+{
+  "mcpServers": {
+    "mytools": {
+      "command": "python3",
+      "args": ["tools/server.py"],
+      "env": { "MY_VAR": "value" }
+    },
+    "remote": {
+      "url": "http://localhost:9000"
+    }
+  }
+}
+```
+
+If `mcp.json` is absent the bot runs normally without tools.
 
 ## Usage
 
 Address the bot in the channel:
 
 ```
-agentbot: summarize what we've discussed so far
-!what is the current plan?
+agentbot: what time is it in Tokyo?
+!summarize what we've discussed so far
 ```
 
 Special commands:
