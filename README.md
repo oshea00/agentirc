@@ -47,6 +47,8 @@ Environment variables:
 | `TOOL_TIMEOUT` | `30` | Seconds before a single tool call is cancelled |
 | `MCP_INIT_TIMEOUT` | `30` | Seconds allowed for tool discovery at startup |
 | `MAX_TOOL_ITERS` | `10` | Maximum tool-call iterations per message |
+| `CONTEXT_LIMIT` | `100000` | Token threshold for context compaction; `0` disables |
+| `COMPACT_PERCENT` | `80` | Compaction fires when context reaches this % of `CONTEXT_LIMIT` |
 
 ## Using local or alternative LLM servers
 
@@ -92,6 +94,22 @@ Create `mcp.json` in the working directory to configure MCP servers. The bot loa
 ```
 
 If `mcp.json` is absent the bot runs normally without tools.
+
+## Context compaction
+
+As a conversation grows the bot tracks how many tokens are in the current context window (using `response.usage.prompt_tokens` from each API call). When that count reaches `COMPACT_PERCENT`% of `CONTEXT_LIMIT`, the bot:
+
+1. Posts a notice to the channel: `[Context at X% (N/LIMIT tokens) — compacting...]`
+2. Asks the model to summarize the full conversation history in plain text
+3. Replaces the history with a single summary message and continues
+
+The compaction call does not use tools and does not count toward `MAX_TOOL_ITERS`. After compaction the conversation continues seamlessly with the summary as its starting context.
+
+Set `CONTEXT_LIMIT=0` to disable compaction entirely. To test compaction quickly, use small values:
+
+```bash
+CONTEXT_LIMIT=2000 COMPACT_PERCENT=80 uv run agentirc.py
+```
 
 ## Usage
 

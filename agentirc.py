@@ -23,6 +23,8 @@ MCP_CONFIG = os.getenv("MCP_CONFIG", "mcp.json")
 TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "30"))
 INIT_TIMEOUT = int(os.getenv("MCP_INIT_TIMEOUT", "30"))
 MAX_TOOL_ITERS = int(os.getenv("MAX_TOOL_ITERS", "10"))
+CONTEXT_LIMIT = int(os.getenv("CONTEXT_LIMIT", "100000"))  # tokens; 0 = disabled
+COMPACT_PERCENT = int(os.getenv("COMPACT_PERCENT", "80"))   # 0-100
 MAX_LINE = 400  # safe IRC message content length
 
 _SYSTEM_PROMPT = (
@@ -58,6 +60,7 @@ class AgentIRC:
         self._send_lock = threading.RLock()
         self._channel_locks: dict[str, threading.Lock] = {}
         self._channel_locks_lock = threading.Lock()
+        self._channel_tokens: dict[str, int] = {}
         self.debug = debug
         self._init_mcp()
         threading.Thread(target=self._watch_mcp, daemon=True, name="mcp-watcher").start()
@@ -205,21 +208,58 @@ class AgentIRC:
     def _ask(self, nick: str, channel: str, prompt: str) -> None:
         ch_lock = self._get_channel_lock(channel)
         with ch_lock:
+            if CONTEXT_LIMIT > 0:
+                prev = self._channel_tokens.get(channel, 0)
+                if prev >= CONTEXT_LIMIT * COMPACT_PERCENT / 100:
+                    pct = int(prev / CONTEXT_LIMIT * 100)
+                    self.send_message(
+                        channel,
+                        f"[Context at {pct}% ({prev}/{CONTEXT_LIMIT} tokens) — compacting...]",
+                    )
+                    self._compact(channel)
+
             with self.history_lock:
                 self.history.append({"role": "user", "content": f"<{nick}> {prompt}"})
                 messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *self.history]
 
             try:
-                reply = self._run_with_tools(messages)
+                reply, prompt_tokens = self._run_with_tools(messages)
             except Exception as exc:
                 reply = f"Error from OpenAI: {exc}"
+                prompt_tokens = 0
+
+            self._channel_tokens[channel] = prompt_tokens
 
             with self.history_lock:
                 self.history.append({"role": "assistant", "content": reply})
 
         self.send_message(channel, reply)
 
-    def _run_with_tools(self, messages: list[dict]) -> str:
+    def _compact(self, channel: str) -> None:
+        with self.history_lock:
+            snapshot = list(self.history)
+        if not snapshot:
+            return
+        summary_messages = [
+            {"role": "system", "content":
+                "Summarize the following conversation concisely in plain text, "
+                "capturing all key results, decisions, and context needed to continue."},
+            *snapshot,
+            {"role": "user", "content":
+                "Summarize the conversation above. Plain text, no markdown."},
+        ]
+        try:
+            resp = self.client.chat.completions.create(model=MODEL, messages=summary_messages)
+            summary = resp.choices[0].message.content.strip()
+        except Exception as exc:
+            print(f"Compaction error: {exc}", flush=True)
+            summary = "(summary unavailable)"
+        with self.history_lock:
+            self.history = [{"role": "assistant",
+                             "content": f"[Conversation summary: {summary}]"}]
+        self._channel_tokens[channel] = 0
+
+    def _run_with_tools(self, messages: list[dict]) -> tuple[str, int]:
         with self._mcp_lock:
             mcp = self.mcp
             tools = list(self.tools)
@@ -229,15 +269,18 @@ class AgentIRC:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        prompt_tokens = 0
         for iteration in range(MAX_TOOL_ITERS + 1):
             if iteration == MAX_TOOL_ITERS:
-                return "(max tool iterations reached)"
+                return "(max tool iterations reached)", prompt_tokens
 
             response = self.client.chat.completions.create(**kwargs)
+            if response.usage:
+                prompt_tokens = response.usage.prompt_tokens
             msg = response.choices[0].message
 
             if not msg.tool_calls:
-                return (msg.content or "").strip()
+                return (msg.content or "").strip(), prompt_tokens
 
             kwargs["messages"] = list(kwargs["messages"]) + [msg]
 
